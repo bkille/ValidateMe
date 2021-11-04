@@ -1,0 +1,6 @@
+[submodule "ext/spdlog"]
+	path = ext/spdlog
+	url = git@github.com:gabime/spdlog.git
+[submodule "CLI11"]
+	path = ext/CLI11
+	url = git@github.com:CLIUtils/CLI11.git
