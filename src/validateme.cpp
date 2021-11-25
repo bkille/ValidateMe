@@ -1,128 +1,85 @@
 #include <iomanip>
+#include <memory>
 #include <iostream>
 #include <fstream>
+#include <iterator>
 #include <math.h>
 #include <sstream>
 #include <string>
 #include <string.h>
 #include <algorithm>
-#include <omp.h>
+#include <unordered_map>
+#include <map>
+#include <unordered_set>
 #include <chrono>
 #include <list>
-#include <vector>
 #include <filesystem>
 #include "CLI/App.hpp"
 #include "CLI/Validators.hpp"
 #include "spdlog/spdlog.h"
 #include "CLI/CLI.hpp"
-#include "tqdm.h"
-#include "bitArray.h"
-#include "MyBloom.h"
-#include "Rambo_construction.h"
-#include "utils.h"
+#include <seqan3/io/sequence_file/input_options.hpp>
+#include <seqan3/io/sequence_file/all.hpp>
+#include <seqan3/alphabet/gap/gapped.hpp>
+#include <seqan3/alphabet/nucleotide/dna4.hpp>
+#include <seqan3/core/debug_stream.hpp>    
 
-using namespace std;
 namespace fs = std::filesystem;
+
+struct gapped_traits : seqan3::sequence_file_input_default_traits_dna
+{
+    using sequence_alphabet = seqan3::gapped<seqan3::dna5>;
+    using sequence_legal_alphabet = seqan3::gapped<seqan3::dna5>;
+};
+
+using seqloc = std::pair<std::string, unsigned int>;
+
+//struct key_hash : public std::unary_function<seqloc, std::size_t>
+//{
+ //std::size_t operator()(const seqloc& k) const
+ //{
+   //return std::get<0>(k) ^ std::get<1>(k);
+ //}
+//};
 
 int main(int argc, char** argv){
     /*
      *Command line parsing
      */
     CLI::App app{"RAMBO application"};
-    app.require_subcommand(1, 1);
-    CLI::App* build_sub = app.add_subcommand("build", "Build database")->fallthrough();
-    std::vector<fs::path> input_files;
-    fs::path input_kmers_file = "";
-    fs::path database_output_dir("database_dir");
-    fs::path query_output_prefix("query");
+    //app.require_subcommand(1, 1);
+    //std::vector<fs::path> input_files;
+    fs::path query_file = "";
+    fs::path truth_file = "";
+    fs::path output_prefix("vm-results");
     bool verbose = false;
-    bool show_progress = false;
     unsigned int num_threads = 1;
 
     // Generic flags
+    app.add_option(
+            "query-file",
+            query_file,
+            "Query MSA file"
+    )->required()->check(CLI::ExistingFile);
+    app.add_option(
+            "truth-file",
+            truth_file,
+            "Truth MSA file"
+    )->required()->check(CLI::ExistingFile);
     app.add_flag(
             "-v,--verbose",
             verbose,
             "Display debug output"
-    );
-    app.add_flag(
-            "--show-progress",
-            show_progress,
-            "Display progress bars"
     );
     app.add_option(
             "-p,--threads",
             num_threads,
             "Number of threads to use"
     );
-    
-    // Build flags
-    int n_per_set = 100000000; //cardinality of each set
-    float FPR = 0.01;
-    int R_all = 10;
-    int B_all = 50;
-    build_sub->add_option(
-            "input-files",
-            input_files,
-            "Input files"
-    )->required()->check(CLI::ExistingFile);
-    build_sub->add_option(
+    app.add_option(
             "-o,--output",
-            database_output_dir,
-            "Directory to store serialized output"
-    );
-    build_sub->add_option(
-            "-R, --repitions",
-            R_all,
-            "Number of repititions in RAMBO index"
-    );
-    build_sub->add_option(
-            "-B, --blooms-per-rep",
-            B_all,
-            "Number of bloom filters per repitition"
-    );
-    build_sub->add_option(
-            "-n, --bloom-size",
-            n_per_set,
-            "Size of each bloom filter (in bits)"
-    );
-
-    // Insert flags
-    CLI::App* insert_sub = app.add_subcommand("insert", "Insert samples into database")->fallthrough();
-    fs::path database_dir;
-    insert_sub->add_option(
-            "input-files",
-            input_files,
-            "Input files"
-    )->required()->check(CLI::ExistingFile);
-    insert_sub->add_option(
-            "-d,--database",
-            database_dir,
-            "Path to RAMBO database directory"
-    )->required()->check(CLI::ExistingDirectory);
-
-    // Query flags
-    CLI::App* query_sub = app.add_subcommand("query", "Check if query is in database")->fallthrough();
-    bool flatten_input = false;
-    query_sub->add_option(
-            "input-files",
-            input_files,
-            "Input files. For each file, RAMBO will check if database contains any entries which are a superset of the input file. Use the --flatten flag if each kmer should be treated independently"
-    )->check(CLI::ExistingFile);
-    //query_sub->add_flag(
-            //"-f,--flatten",
-            //flatten_input,
-            //"Treat each kmer from each input file as an individual sample"
-    //);
-    query_sub->add_option(
-            "-d,--database",
-            database_dir,
-            "Path to RAMBO database directory"
-    )->required()->check(CLI::ExistingDirectory);
-    query_sub->add_option(
-            "-o,--output",
-            query_output_prefix,
-            "Prefix to TSV output file. Results will be stored at <prefix>_results.tsv"
+            output_prefix,
+            "Prefix of output directory"
     );
 
     CLI11_PARSE(app, argc, argv);
@@ -131,8 +88,72 @@ int main(int argc, char** argv){
      *Constants and assertions 
      */
     spdlog::set_level(verbose ? spdlog::level::debug : spdlog::level::info); // Set global log level to debug
-    omp_set_num_threads(num_threads);
+    //omp_set_num_threads(num_threads);
+    
 
 
+    // Set up truth data-structures
+    seqan3::sequence_file_input<gapped_traits> truth_file_h{truth_file};
+    std::unordered_map<unsigned int, std::set<seqloc>> idx_to_set; 
+    std::map<seqloc, unsigned int> loc_to_idx; 
+    int alignment_length = 0;
+    for (auto & [seq, id, qual] : truth_file_h)
+    {
+        seqan3::debug_stream << "ID:     " << id << '\n';
+        if (alignment_length && seq.size() != alignment_length) {
+            spdlog::error("Sequences do not have the same length!");
+            return 1;
+        }
+        alignment_length = seq.size();
 
+        unsigned int ng = 0;
+        for (auto col_idx = 0; col_idx < seq.size(); ++col_idx) {
+            if (seq[col_idx] == seqan3::gap{})
+                continue;
+            ++ng;
+            idx_to_set[col_idx].insert(std::make_pair(id, ng));
+            loc_to_idx[std::make_pair(id, ng)] = col_idx;
+        }
+        //seqan3::debug_stream << query_group << std::endl;
+    }
+
+
+    // Set up query data structures
+    seqan3::sequence_file_input<gapped_traits> query_file_h{query_file};
+    std::vector<std::set<seqloc>> query_groups(alignment_length);
+    for (auto & [seq, id, qual] : query_file_h)
+    {
+        seqan3::debug_stream << "QID:     " << id << '\n';
+        if (alignment_length && seq.size() != alignment_length) {
+            spdlog::error("Query sequence length does not match the truth!");
+            return 1;
+        }
+        unsigned int ng = 0;
+        for (auto col_idx = 0; col_idx < seq.size(); ++col_idx) {
+            if (seq[col_idx] == seqan3::gap{})
+                continue;
+            ++ng;
+            query_groups[col_idx].insert(std::make_pair(id, ng));
+        }
+    }
+
+
+    // Compute intersections
+    unsigned int fp = 0, fn = 0, tp = 0;
+    for (auto query_group : query_groups) {
+        for (seqloc sl : query_group) {
+            auto truth_group = idx_to_set[loc_to_idx[sl]];
+            std::vector<seqloc> v_intersection;
+            std::set_intersection(truth_group.begin(), truth_group.end(), query_group.begin(), query_group.end(), std::back_inserter(v_intersection));
+            tp += v_intersection.size();
+            v_intersection.clear();
+            std::set_difference(truth_group.begin(), truth_group.end(), query_group.begin(), query_group.end(), std::back_inserter(v_intersection));
+            fn += v_intersection.size();
+            v_intersection.clear();
+            std::set_difference(query_group.begin(), query_group.end(), truth_group.begin(), truth_group.end(), std::back_inserter(v_intersection));
+            fp += v_intersection.size();
+            v_intersection.clear();
+        }
+    }
+    spdlog::info("TP = {}, FN = {}, FP = {}", tp, fn, fp);
 }

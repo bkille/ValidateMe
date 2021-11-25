@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 
+set(CMAKE_VERBOSE_MAKEFILE ON)
+
 # set the project name
 project(ValidateMe VERSION 0.1)
 
@@ -9,10 +11,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 option(BUILD_BENCHMARKS "Build Bechmarks" OFF)
 
 # specify global compiler flags
-add_compile_options(-std=c++17 -march=native -pedantic -Wall -Wextra)
+add_compile_options(-std=c++2a -march=native -pedantic -Wall -Wextra -lstdc++fs -static -g -O0)
+link_directories($ENV{CONDA_PREFIX}/lib)
 
 # add the tests executable
-add_executable(tests src/validateme.cpp)
+add_executable(validateme src/validateme.cpp)
 
 # configure benchmarks
 #if (BUILD_BENCHMARKS)
@@ -29,12 +32,12 @@ set_property(GLOBAL PROPERTY CXX_STANDARD 17)
 set_property(GLOBAL PROPERTY CXX_STANDARD_REQUIRED true)
 
 # specify global include directories
-#include_directories(./ext/libsimdpp ./include ./ext/libsimdpp ./ext/bit)
+include_directories($ENV{CONDA_PREFIX}/include include ext/CLI11/include)
 
 # specify test-specific flags
-target_compile_options(tests PUBLIC -O0 -g -fno-omit-frame-pointer -pg)
+target_link_libraries(validateme -lstdc++fs -lspdlog)
 
 # specify test-specific libraries
-#target_include_directories(tests PRIVATE ./ext/catch)
+#target_include_directories(validateme PRIVATE ./ext/catch)
 
-install(TARGETS tests DESTINATION .)
+install(TARGETS validateme DESTINATION .)
