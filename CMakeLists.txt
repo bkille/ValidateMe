@@ -32,7 +32,7 @@ set_property(GLOBAL PROPERTY CXX_STANDARD 17)
 set_property(GLOBAL PROPERTY CXX_STANDARD_REQUIRED true)
 
 # specify global include directories
-include_directories($ENV{CONDA_PREFIX}/include include ext/CLI11/include)
+include_directories($ENV{CONDA_PREFIX}/include include ext/CLI11/include ext/cpptqdm)
 
 # specify test-specific flags
 target_link_libraries(validateme -lstdc++fs -lspdlog)
