@@ -4,9 +4,6 @@
 [submodule "CLI11"]
 	path = ext/CLI11
 	url = git@github.com:CLIUtils/CLI11.git
-[submodule "ext/tqdm"]
-	path = ext/tqdm
-	url = git@github.com:tqdm/tqdm.cpp.git
 [submodule "ext/cpptqdm"]
 	path = ext/cpptqdm
 	url = git@github.com:aminnj/cpptqdm.git
