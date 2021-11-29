@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <memory>
 #include <regex>
+#include <bitset>
+#include <omp.h>
 #include <unordered_map>
 #include <map>
 #include <unordered_set>
@@ -35,15 +37,7 @@ struct gapped_traits : seqan3::sequence_file_input_default_traits_dna
     using sequence_legal_alphabet = seqan3::gapped<seqan3::dna5>;
 };
 
-using seqloc = std::pair<std::string, unsigned int>;
-
-//struct key_hash : public std::unary_function<seqloc, std::size_t>
-//{
- //std::size_t operator()(const seqloc& k) const
- //{
-   //return std::get<0>(k) ^ std::get<1>(k);
- //}
-//};
+using seqloc = std::pair<std::size_t, unsigned int>;
 
 int main(int argc, char** argv){
     /*
@@ -68,8 +62,7 @@ int main(int argc, char** argv){
             "truth-file",
             truth_file,
             "Truth MSA file"
-    //)->required()->check(CLI::ExistingFile);
-    );
+    )->required()->check(CLI::ExistingFile);
     app.add_flag(
             "-v,--verbose",
             verbose,
@@ -92,90 +85,129 @@ int main(int argc, char** argv){
      *Constants and assertions 
      */
     spdlog::set_level(verbose ? spdlog::level::debug : spdlog::level::info); // Set global log level to debug
-    //omp_set_num_threads(num_threads);
+    omp_set_num_threads(num_threads);
     
     // Get block count for both files
     std::ifstream inFile(truth_file); 
-    int truth_seq_count = std::count(std::istreambuf_iterator<char>(inFile), 
+    unsigned int truth_seq_count = std::count(std::istreambuf_iterator<char>(inFile), 
         std::istreambuf_iterator<char>(), '>'); 
     inFile.close();
     inFile = std::ifstream(query_file);
-    int query_seq_count = std::count(std::istreambuf_iterator<char>(inFile), 
+    unsigned int query_seq_count = std::count(std::istreambuf_iterator<char>(inFile), 
         std::istreambuf_iterator<char>(), '>'); 
     inFile.close();
     seqan3::sequence_file_input<gapped_traits> truth_file_h{truth_file};
-    int truth_blocks = 0;
-    int query_blocks = 0;
+    unsigned int truth_blocks = 0;
+    unsigned int query_blocks = 0;
+    auto truth_sequences = std::set<std::string>{};
+    auto seq_to_idx = std::map<std::string, int>{};
     spdlog::debug("Counting truth blocks...");
     tqdm bar;
     int idx = 0;
+    #pragma omp parallel
+    #pragma omp single
+    {
     for (auto & [seq, id, qual] : truth_file_h)
     {
         idx += 1;
-        bar.progress(idx, truth_seq_count);
+        #pragma omp task firstprivate(seq, id, qual, idx)
+        {
         std::string s = id;
         std::regex rgx("(.+?) ID=(\\d+?)\\s(\\d+?)\\s(\\d+?)\\s([+,-])\\s(\\d+*)");
         std::smatch matches;
         std::string seq_id;
         if(std::regex_search(s, matches, rgx)) {
-            truth_blocks = std::stoi(matches[2].str());
+            auto truth_blocks_thread = std::stoi(matches[2].str());
+            seq_id = matches[1].str();
+            #pragma omp critical 
+            {
+            bar.progress(idx, truth_seq_count);
+            truth_sequences.insert(seq_id);
+            truth_blocks = truth_blocks_thread > truth_blocks 
+                ? truth_blocks_thread : truth_blocks;
+            }
         } else {
             std::cout << "Match not found\n";
-            continue;
+        }
         }
     }
+    }
     bar.finish();
+    bar.reset();
+    idx = 0;
+    for (auto seq_id : truth_sequences) {
+        seq_to_idx[seq_id] = idx++;
+    }
     spdlog::debug("Truth blocks: {}", truth_blocks);
     spdlog::debug("Counting query blocks...");
     seqan3::sequence_file_input<gapped_traits> query_file_h{query_file};
     idx = 0;
+
+    #pragma omp parallel
+    #pragma omp single
+    {
     for (auto & [seq, id, qual] : query_file_h)
     {
         idx += 1;
         bar.progress(idx, query_seq_count);
+        #pragma omp task firstprivate(seq, id, qual, idx)
+        {
         std::string s = id;
         std::regex rgx("(.+?) ID=(\\d+?)\\s(\\d+?)\\s(\\d+?)\\s([+,-])\\s(\\d+*)");
         std::smatch matches;
         std::string seq_id;
         if(std::regex_search(s, matches, rgx)) {
-            query_blocks = std::stoi(matches[2].str());
+            auto query_blocks_thread = std::stoi(matches[2].str());
+            #pragma omp critical 
+            {
+            query_blocks = query_blocks_thread > query_blocks 
+                ? query_blocks_thread : query_blocks;
+            }
         } else {
             std::cout << "Match not found\n";
-            continue;
+        }
         }
     }
+    }
     bar.finish();
+    bar.reset();
     spdlog::debug("Query blocks: {}", query_blocks);
 
 
     // Create homology groups and mappings for the truth set
     spdlog::debug("Creating truth data homology groups");
     truth_file_h = seqan3::sequence_file_input<gapped_traits>(truth_file);
-    int curr_block = -1;
-    std::vector<std::shared_ptr<std::set<seqloc>>> groups; 
+    using GroupVec = std::vector<std::shared_ptr<std::set<seqloc>>>; 
+    std::vector<GroupVec> truth_block_vec = std::vector<GroupVec>(truth_blocks);
     std::map<seqloc, std::shared_ptr<std::set<seqloc>>> loc_to_idx; 
-    for (auto & [seq, id, qual] : truth_file_h)
+    unsigned int seq_count = 0;
+    #pragma omp parallel
+    #pragma omp single
     {
+    for (auto & [seq, id, qual] : truth_file_h) {
+        #pragma omp task firstprivate(seq, id, qual)
+        {
         std::string s = id;
         std::regex rgx("(.+?) ID=(\\d+?)\\s(\\d+?)\\s(\\d+?)\\s([+,-])\\s(\\d+*)");
         std::smatch matches;
         std::string seq_id;
-        int start, strand, block_id;
+        unsigned int start, block_id;
+        int strand;
         if(std::regex_search(s, matches, rgx)) {
             seq_id = matches[1].str();
-            block_id = std::stoi(matches[2].str());
+            block_id = std::stoi(matches[2].str()) - 1;
             start = std::stoi(matches[3].str());
             strand = matches[5].str() == "-" ? -1 : 1;
-        } else {
-            spdlog::error("ID {} does not fit the format", id);
-            continue;
         }
-        bar.progress(block_id, truth_blocks);
-        if (block_id != curr_block) {
-            curr_block = block_id;
-            groups = std::vector<std::shared_ptr<std::set<seqloc>>>(seq.size());
-            for (auto i = 0; i < seq.size(); ++i) {
-                groups[i] = std::make_shared<std::set<seqloc>>();
+        if (truth_block_vec[block_id].empty()) {
+            #pragma omp critical 
+            {
+            if (truth_block_vec[block_id].empty()) {
+                truth_block_vec[block_id].resize(seq.size());
+                for (auto i = 0; i < seq.size(); ++i) {
+                    truth_block_vec[block_id][i] = std::make_shared<std::set<seqloc>>();
+                }
+            }
             }
         }
         unsigned int ng = 0;
@@ -183,87 +215,118 @@ int main(int argc, char** argv){
             if (seq[col_idx] == seqan3::gap{})
                 continue;
             ++ng;
-            seqloc sl = std::make_pair(seq_id, start + ng);
-            groups[col_idx]->insert(sl);
-            loc_to_idx[sl] = groups[col_idx];
-            //seqan3::debug_stream << *loc_to_idx[std::make_pair(seq_id, start + strand*ng)] << std::endl;
+            seqloc sl = std::make_pair(seq_to_idx[seq_id], start + ng);
+            #pragma omp critical 
+            {
+            truth_block_vec[block_id][col_idx]->insert(sl);
+            loc_to_idx[sl] = truth_block_vec[block_id][col_idx];
+            }
+        }
+        #pragma omp critical 
+        {
+        seq_count += 1;
+        bar.progress(seq_count, truth_seq_count);
+        }
         }
     }
+    }
     bar.finish();
+    bar.reset();
 
     // Create homologies for query
     spdlog::debug("Creating query data homology groups");
     query_file_h = seqan3::sequence_file_input<gapped_traits>(query_file);
-    curr_block = -1;
-    std::vector<std::shared_ptr<std::vector<std::set<seqloc>>>> block_groups;
-    std::shared_ptr<std::vector<std::set<seqloc>>> query_groups; 
-    for (auto & [seq, id, qual] : query_file_h)
+    std::vector<GroupVec> query_block_vec = std::vector<GroupVec>(query_blocks);
+    seq_count = 0;
+    #pragma omp parallel
+    #pragma omp single
     {
-        //seqan3::debug_stream << "ID:     " << id << '\n';
+    for (auto & [seq, id, qual] : query_file_h) {
+        #pragma omp task firstprivate(seq, id, qual)
+        {
         std::string s = id;
         std::regex rgx("(.+?) ID=(\\d+?)\\s(\\d+?)\\s(\\d+?)\\s([+,-])\\s(\\d+*)");
         std::smatch matches;
         std::string seq_id;
-        int start, strand, block_id;
+        unsigned int start, block_id;
+        int strand;
         if(std::regex_search(s, matches, rgx)) {
             seq_id = matches[1].str();
-            block_id = std::stoi(matches[2].str());
+            block_id = std::stoi(matches[2].str()) - 1;
             start = std::stoi(matches[3].str());
             strand = matches[5].str() == "-" ? -1 : 1;
-        } else {
-            spdlog::error("ID {} does not fit the format", id);
-            continue;
         }
-        bar.progress(block_id, query_blocks);
-        if (block_id != curr_block) {
-            if (curr_block != -1) {
-                block_groups.push_back(query_groups);
+        if (query_block_vec[block_id].empty()) {
+            #pragma omp critical 
+            {
+            if (query_block_vec[block_id].empty()) {
+                query_block_vec[block_id].resize(seq.size());
+                for (auto i = 0; i < seq.size(); ++i) {
+                    query_block_vec[block_id][i] = std::make_shared<std::set<seqloc>>();
+                }
             }
-            curr_block = block_id;
-            query_groups = std::make_shared<std::vector<std::set<seqloc>>>(seq.size());
+            }
         }
         unsigned int ng = 0;
         for (auto col_idx = 0; col_idx < seq.size(); ++col_idx) {
             if (seq[col_idx] == seqan3::gap{})
                 continue;
             ++ng;
-            (*query_groups)[col_idx].insert(std::make_pair(seq_id, start + ng));
+            seqloc sl = std::make_pair(seq_to_idx[seq_id], start + ng);
+            #pragma omp critical 
+            {
+            query_block_vec[block_id][col_idx]->insert(sl);
+            }
+        }
+        #pragma omp critical 
+        {
+        seq_count += 1;
+        bar.progress(seq_count, query_seq_count);
+        }
         }
     }
-    if (curr_block != -1) {
-        block_groups.push_back(query_groups);
     }
     bar.finish();
+    bar.reset();
 
 
     // Compute intersections
     spdlog::debug("Computing metrics...");
     idx = 0;
     unsigned int fp = 0, fn = 0, tp = 0;
-    for (auto block_group : block_groups) {
-        for (auto query_group : *block_group) {
-            //seqan3::debug_stream << query_group << std::endl;
-            for (seqloc sl : query_group) {
-                auto truth_group = *loc_to_idx[sl];
+    //#pragma omp parallel for reduction(+:fp, fn, tp)
+    for (auto block_group : query_block_vec) {
+        for (auto query_group : block_group) {
+            for (seqloc sl : *query_group) {
+                auto truth_group = loc_to_idx[sl];
                 std::vector<seqloc> v_intersection;
-                std::set_intersection(truth_group.begin(), truth_group.end(), query_group.begin(), query_group.end(), std::back_inserter(v_intersection));
+                std::set_intersection(
+                        truth_group->begin(), truth_group->end(), 
+                        query_group->begin(), query_group->end(), 
+                        std::back_inserter(v_intersection));
                 tp += v_intersection.size();
                 v_intersection.clear();
-                std::set_difference(truth_group.begin(), truth_group.end(), query_group.begin(), query_group.end(), std::back_inserter(v_intersection));
+                std::set_difference(
+                        truth_group->begin(), truth_group->end(), 
+                        query_group->begin(), query_group->end(), 
+                        std::back_inserter(v_intersection));
                 fn += v_intersection.size();
-                //if (!v_intersection.empty())
-                    //seqan3::debug_stream << truth_group << std::endl;
                 v_intersection.clear();
-                std::set_difference(query_group.begin(), query_group.end(), truth_group.begin(), truth_group.end(), std::back_inserter(v_intersection));
+                std::set_difference(
+                        query_group->begin(), query_group->end(), 
+                        truth_group->begin(), truth_group->end(), 
+                        std::back_inserter(v_intersection));
                 fp += v_intersection.size();
-                //if (!v_intersection.empty())
-                    //seqan3::debug_stream << truth_group << std::endl;
                 v_intersection.clear();
             }
         }
-        bar.progress(idx, block_groups.size());
+#pragma omp critical 
+        {
+        bar.progress(idx, query_block_vec.size());
         idx += 1;
+}
     }
     bar.finish();
+    bar.reset();
     spdlog::info("TP = {}, FN = {}, FP = {}", tp, fn, fp);
 }
