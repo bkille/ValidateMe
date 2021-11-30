@@ -103,7 +103,7 @@ int main(int argc, char** argv){
     auto seq_to_idx = std::map<std::string, int>{};
     spdlog::debug("Counting truth blocks...");
     tqdm bar;
-    int idx = 0;
+    unsigned int idx = 0;
     #pragma omp parallel
     #pragma omp single
     {
@@ -127,7 +127,7 @@ int main(int argc, char** argv){
                 ? truth_blocks_thread : truth_blocks;
             }
         } else {
-            std::cout << "Match not found\n";
+            spdlog::error("{} does not fit the header format", id);
         }
         }
     }
@@ -136,6 +136,7 @@ int main(int argc, char** argv){
     bar.reset();
     idx = 0;
     for (auto seq_id : truth_sequences) {
+        spdlog::debug("{}: {}", idx, seq_id);
         seq_to_idx[seq_id] = idx++;
     }
     spdlog::debug("Truth blocks: {}", truth_blocks);
@@ -150,7 +151,7 @@ int main(int argc, char** argv){
     {
         idx += 1;
         bar.progress(idx, query_seq_count);
-        #pragma omp task firstprivate(seq, id, qual, idx)
+        #pragma omp task firstprivate(seq, id, qual)
         {
         std::string s = id;
         std::regex rgx("(.+?) ID=(\\d+?)\\s(\\d+?)\\s(\\d+?)\\s([+,-])\\s(\\d+*)");
@@ -164,7 +165,7 @@ int main(int argc, char** argv){
                 ? query_blocks_thread : query_blocks;
             }
         } else {
-            std::cout << "Match not found\n";
+            spdlog::error("{} does not fit the header format", id);
         }
         }
     }
@@ -180,6 +181,7 @@ int main(int argc, char** argv){
     using GroupVec = std::vector<std::shared_ptr<std::set<seqloc>>>; 
     std::vector<GroupVec> truth_block_vec = std::vector<GroupVec>(truth_blocks);
     std::map<seqloc, std::shared_ptr<std::set<seqloc>>> loc_to_idx; 
+    std::map<seqloc, unsigned int> loc_to_start; 
     unsigned int seq_count = 0;
     #pragma omp parallel
     #pragma omp single
@@ -191,13 +193,17 @@ int main(int argc, char** argv){
         std::regex rgx("(.+?) ID=(\\d+?)\\s(\\d+?)\\s(\\d+?)\\s([+,-])\\s(\\d+*)");
         std::smatch matches;
         std::string seq_id;
-        unsigned int start, block_id;
+        unsigned int start, block_id, length;
         int strand;
         if(std::regex_search(s, matches, rgx)) {
             seq_id = matches[1].str();
             block_id = std::stoi(matches[2].str()) - 1;
             start = std::stoi(matches[3].str());
             strand = matches[5].str() == "-" ? -1 : 1;
+            length = std::stoi(matches[6].str());
+            if (strand == -1) {
+                start = length - start + 1;
+            }
         }
         if (truth_block_vec[block_id].empty()) {
             #pragma omp critical 
@@ -215,11 +221,12 @@ int main(int argc, char** argv){
             if (seq[col_idx] == seqan3::gap{})
                 continue;
             ++ng;
-            seqloc sl = std::make_pair(seq_to_idx[seq_id], start + ng);
+            seqloc sl = std::make_pair(seq_to_idx[seq_id], start + ng*strand);
             #pragma omp critical 
             {
             truth_block_vec[block_id][col_idx]->insert(sl);
             loc_to_idx[sl] = truth_block_vec[block_id][col_idx];
+            loc_to_start[sl] = start;
             }
         }
         #pragma omp critical 
@@ -248,13 +255,17 @@ int main(int argc, char** argv){
         std::regex rgx("(.+?) ID=(\\d+?)\\s(\\d+?)\\s(\\d+?)\\s([+,-])\\s(\\d+*)");
         std::smatch matches;
         std::string seq_id;
-        unsigned int start, block_id;
+        unsigned int start, block_id, length;
         int strand;
         if(std::regex_search(s, matches, rgx)) {
             seq_id = matches[1].str();
             block_id = std::stoi(matches[2].str()) - 1;
             start = std::stoi(matches[3].str());
             strand = matches[5].str() == "-" ? -1 : 1;
+            length = std::stoi(matches[6].str());
+            if (strand == -1) {
+                start = length - start + 1;
+            }
         }
         if (query_block_vec[block_id].empty()) {
             #pragma omp critical 
@@ -272,7 +283,7 @@ int main(int argc, char** argv){
             if (seq[col_idx] == seqan3::gap{})
                 continue;
             ++ng;
-            seqloc sl = std::make_pair(seq_to_idx[seq_id], start + ng);
+            seqloc sl = std::make_pair(seq_to_idx[seq_id], start + ng*strand);
             #pragma omp critical 
             {
             query_block_vec[block_id][col_idx]->insert(sl);
@@ -294,7 +305,7 @@ int main(int argc, char** argv){
     spdlog::debug("Computing metrics...");
     idx = 0;
     unsigned int fp = 0, fn = 0, tp = 0;
-    //#pragma omp parallel for reduction(+:fp, fn, tp)
+    #pragma omp parallel for reduction(+:fp, fn, tp)
     for (auto block_group : query_block_vec) {
         for (auto query_group : block_group) {
             for (seqloc sl : *query_group) {
