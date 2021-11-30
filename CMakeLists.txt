@@ -11,7 +11,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 option(BUILD_BENCHMARKS "Build Bechmarks" OFF)
 
 # specify global compiler flags
-add_compile_options(-std=c++2a -march=native -pedantic -Wall -Wextra -lstdc++fs -static -g -O0)
+add_compile_options(-std=c++2a -march=native -fopenmp -pedantic -Wall -Wextra -lstdc++fs -static -g -O3)
 link_directories($ENV{CONDA_PREFIX}/lib)
 
 # add the tests executable
@@ -35,7 +35,7 @@ set_property(GLOBAL PROPERTY CXX_STANDARD_REQUIRED true)
 include_directories($ENV{CONDA_PREFIX}/include include ext/CLI11/include ext/cpptqdm)
 
 # specify test-specific flags
-target_link_libraries(validateme -lstdc++fs -lspdlog)
+target_link_libraries(validateme -fopenmp -lstdc++fs -lspdlog)
 
 # specify test-specific libraries
 #target_include_directories(validateme PRIVATE ./ext/catch)
